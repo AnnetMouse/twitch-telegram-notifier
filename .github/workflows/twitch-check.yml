@@ -1,0 +1,111 @@
+name: Twitch Telegram Notifier
+
+on:
+  # Автоматическая проверка каждые 5 минут.
+  schedule:
+    - cron: "2-59/5 * * * *"
+
+  # Возможность запустить workflow вручную.
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Выберите действие"
+        required: true
+        default: "check"
+        type: choice
+        options:
+          - check
+          - test
+          - chat_id
+
+# Разрешение на чтение файлов и запись state.json обратно в репозиторий.
+permissions:
+  contents: write
+
+# Не позволяет двум проверкам одновременно изменять state.json.
+concurrency:
+  group: twitch-telegram-notifier
+  cancel-in-progress: false
+
+jobs:
+  twitch-check:
+    name: Проверка Twitch и отправка в Telegram
+
+    # Виртуальный компьютер GitHub на Ubuntu.
+    runs-on: ubuntu-latest
+
+    # Максимальное время выполнения.
+    timeout-minutes: 10
+
+    # Переменные окружения для Python-скриптов.
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+      TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+      TWITCH_CHANNEL: ${{ secrets.TWITCH_CHANNEL }}
+
+      # При автоматическом запуске input отсутствует,
+      # поэтому используется операция check.
+      OPERATION: ${{ inputs.operation || 'check' }}
+
+    steps:
+      # Шаг 1. Загрузка файлов репозитория на сервер GitHub.
+      - name: Загрузка репозитория
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Шаг 2. Установка Python.
+      - name: Установка Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # Шаг 3. Установка библиотек из requirements.txt.
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Шаг 4. Показывает выбранный режим в журнале.
+      - name: Информация о запуске
+        run: |
+          echo "Операция: $OPERATION"
+          echo "Ветка: $GITHUB_REF_NAME"
+          echo "Репозиторий: $GITHUB_REPOSITORY"
+
+      # Шаг 5. Получение Telegram Chat ID.
+      - name: Определение Telegram Chat ID
+        if: env.OPERATION == 'chat_id'
+        run: python get_chat_id.py
+
+      # Шаг 6. Отправка тестового уведомления.
+      - name: Отправка тестового сообщения
+        if: env.OPERATION == 'test'
+        run: python bot.py --test
+
+      # Шаг 7. Обычная проверка Twitch.
+      - name: Проверка Twitch
+        if: env.OPERATION == 'check'
+        run: python bot.py
+
+      # Шаг 8. Сохранение state.json.
+      - name: Сохранение состояния
+        if: env.OPERATION == 'check'
+        run: |
+          if git diff --quiet -- state.json; then
+            echo "state.json не изменился."
+            exit 0
+          fi
+
+          git config user.name "Twitch Notifier Bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add state.json
+          git commit -m "Update Twitch stream state"
+
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
